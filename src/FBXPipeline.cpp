@@ -1,6 +1,6 @@
 #include "FBXPipeline.h"
 #include "extern.h"
-#include "GeoTransform.h"
+#include "coordinate_transformer.h"
 #include <osg/MatrixTransform>
 #include <osg/Geode>
 #include <osg/Material>
@@ -406,7 +406,7 @@ void FBXPipeline::buildOctree(OctreeNode* node) {
 }
 
 struct TileStats { size_t node_count = 0; size_t vertex_count = 0; size_t triangle_count = 0; size_t material_count = 0; };
-void appendGeometryToModel(tinygltf::Model& model, const std::vector<InstanceRef>& instances, const PipelineSettings& settings, json* batchTableJson, int* batchIdCounter, const SimplificationParams& simParams, osg::BoundingBoxd* outBox = nullptr, TileStats* stats = nullptr, const char* dbgTileName = nullptr, osg::Vec3d rtcOffset = osg::Vec3d(0,0,0)) {
+void appendGeometryToModel(tinygltf::Model& model, const std::vector<InstanceRef>& instances, const PipelineSettings& settings, json* batchTableJson, int* batchIdCounter, const SimplificationParams& simParams, osg::BoundingBoxd* outBox = nullptr, TileStats* stats = nullptr, const char* dbgTileName = nullptr) {
     if (instances.empty()) return;
 
     // Ensure model has at least one buffer
@@ -486,7 +486,6 @@ void appendGeometryToModel(tinygltf::Model& model, const std::vector<InstanceRef
                                 for (unsigned int i = 0; i < cnt; ++i) {
                                     osg::Vec3d p((double)ptr[i*comps+0], (double)ptr[i*comps+1], (double)ptr[i*comps+2]);
                                     p = p * inst.matrix;
-                                    p = p - rtcOffset;
                                     float px = (float)p.x();
                                     float py = (float)-p.z();
                                     float pz = (float)p.y();
@@ -568,7 +567,6 @@ void appendGeometryToModel(tinygltf::Model& model, const std::vector<InstanceRef
                                 for (unsigned int i = 0; i < cnt; ++i) {
                                     osg::Vec3d p(ptr[i*comps+0], ptr[i*comps+1], ptr[i*comps+2]);
                                     p = p * inst.matrix;
-                                    p = p - rtcOffset;
                                     float px = (float)p.x();
                                     float py = (float)-p.z();
                                     float pz = (float)p.y();
@@ -670,7 +668,6 @@ void appendGeometryToModel(tinygltf::Model& model, const std::vector<InstanceRef
                     osg::Vec3 vf = (*v)[i];
                     osg::Vec3d p(vf.x(), vf.y(), vf.z());
                     p = p * inst.matrix;
-                    p = p - rtcOffset;
                     float px = (float)p.x();
                     float py = (float)-p.z();
                     float pz = (float)p.y();
@@ -709,7 +706,6 @@ void appendGeometryToModel(tinygltf::Model& model, const std::vector<InstanceRef
                 for (unsigned int i = 0; i < v3d->size(); ++i) {
                     osg::Vec3d p = (*v3d)[i];
                     p = p * inst.matrix;
-                    p = p - rtcOffset;
                     float px = (float)p.x();
                     float py = (float)-p.z();
                     float pz = (float)p.y();
@@ -749,7 +745,6 @@ void appendGeometryToModel(tinygltf::Model& model, const std::vector<InstanceRef
                     osg::Vec4 vf = (*v4)[i];
                     osg::Vec3d p(vf.x(), vf.y(), vf.z());
                     p = p * inst.matrix;
-                    p = p - rtcOffset;
                     double gx = p.x();
                     double gy = -p.z();
                     double gz = p.y();
@@ -792,7 +787,6 @@ void appendGeometryToModel(tinygltf::Model& model, const std::vector<InstanceRef
                     osg::Vec4d vd = (*v4d)[i];
                     osg::Vec3d p(vd.x(), vd.y(), vd.z());
                     p = p * inst.matrix;
-                    p = p - rtcOffset;
                     double gx = p.x();
                     double gy = -p.z();
                     double gz = p.y();
@@ -1007,28 +1001,56 @@ void appendGeometryToModel(tinygltf::Model& model, const std::vector<InstanceRef
         int bvPosIdx = -1, bvNormIdx = -1, bvTexIdx = -1, bvIndIdx = -1, bvBatchIdx = -1;
 
         if (!dracoCompressed) {
-            // Write to buffer
+            auto alignTo4 = [](size_t currentSize) -> size_t {
+                size_t padding = (4 - (currentSize % 4)) % 4;
+                return padding;
+            };
+
+            size_t posPadding = alignTo4(buffer.data.size());
+            for (size_t i = 0; i < posPadding; ++i) {
+                buffer.data.push_back(0);
+            }
+
             size_t posOffset = buffer.data.size();
             size_t posLen = positions.size() * sizeof(float);
             buffer.data.resize(posOffset + posLen);
             memcpy(buffer.data.data() + posOffset, positions.data(), posLen);
+
+            size_t normPadding = alignTo4(buffer.data.size());
+            for (size_t i = 0; i < normPadding; ++i) {
+                buffer.data.push_back(0);
+            }
 
             size_t normOffset = buffer.data.size();
             size_t normLen = normals.size() * sizeof(float);
             buffer.data.resize(normOffset + normLen);
             memcpy(buffer.data.data() + normOffset, normals.data(), normLen);
 
+            size_t texPadding = alignTo4(buffer.data.size());
+            for (size_t i = 0; i < texPadding; ++i) {
+                buffer.data.push_back(0);
+            }
+
             size_t texOffset = buffer.data.size();
             size_t texLen = texcoords.size() * sizeof(float);
             buffer.data.resize(texOffset + texLen);
             memcpy(buffer.data.data() + texOffset, texcoords.data(), texLen);
+
+            size_t indPadding = alignTo4(buffer.data.size());
+            for (size_t i = 0; i < indPadding; ++i) {
+                buffer.data.push_back(0);
+            }
 
             size_t indOffset = buffer.data.size();
             size_t indLen = indices.size() * sizeof(unsigned int);
             buffer.data.resize(indOffset + indLen);
             memcpy(buffer.data.data() + indOffset, indices.data(), indLen);
 
-            // Batch IDs
+            size_t batchPadding = alignTo4(buffer.data.size());
+            for (size_t i = 0; i < batchPadding; ++i) {
+                buffer.data.push_back(0);
+            }
+
             size_t batchOffset = buffer.data.size();
             size_t batchLen = batchIds.size() * sizeof(float);
             buffer.data.resize(batchOffset + batchLen);
@@ -1166,6 +1188,13 @@ void appendGeometryToModel(tinygltf::Model& model, const std::vector<InstanceRef
                     std::string mimeType = "image/png"; // default
                     bool hasData = false;
 
+                    GLenum pf = img->getPixelFormat();
+                    GLenum dt = img->getDataType();
+                    int w = img->s();
+                    int h = img->t();
+                    LOG_I("Texture: %s, pixelFormat=0x%X, dataType=0x%X, width=%d, height=%d, hasData=%d",
+                          imgPath.empty() ? "(embedded)" : imgPath.c_str(), pf, dt, w, h, img->data() ? 1 : 0);
+
                     // Try KTX2 compression if enabled
                     if (settings.enableTextureCompress) {
                         std::vector<unsigned char> compressedData;
@@ -1187,10 +1216,6 @@ void appendGeometryToModel(tinygltf::Model& model, const std::vector<InstanceRef
 
                     bool hasAlphaTransparency = false;
                     {
-                        GLenum pf = img->getPixelFormat();
-                        GLenum dt = img->getDataType();
-                        int w = img->s();
-                        int h = img->t();
                         int channels = 0;
                         if (pf == GL_LUMINANCE) channels = 1;
                         else if (pf == GL_LUMINANCE_ALPHA) channels = 2;
@@ -1225,12 +1250,20 @@ void appendGeometryToModel(tinygltf::Model& model, const std::vector<InstanceRef
 
                     // Fallback: If file not found but image data exists (e.g. embedded or generated)
                     if (!hasData && img->data() != nullptr) {
+                        LOG_I("Fallback: Writing image from memory, imgPath=%s, pixelFormat=0x%X, width=%d, height=%d",
+                              imgPath.empty() ? "(empty)" : imgPath.c_str(), pf, w, h);
+
+                        // glTF only supports PNG and JPEG, so always use PNG for other formats
                         std::string ext = "png";
                         if (!imgPath.empty()) {
                             std::string e = fs::path(imgPath).extension().string();
                             if (!e.empty() && e.size() > 1) {
-                                ext = e.substr(1); // remove dot
-                                std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+                                e = e.substr(1); // remove dot
+                                std::transform(e.begin(), e.end(), e.begin(), ::tolower);
+                                // Only use jpg/jpeg extension, otherwise force PNG
+                                if (e == "jpg" || e == "jpeg") {
+                                    ext = e;
+                                }
                             }
                         }
 
@@ -1265,6 +1298,7 @@ void appendGeometryToModel(tinygltf::Model& model, const std::vector<InstanceRef
                     }
 
                     if (hasData) {
+                         LOG_I("Writing image: mimeType=%s, size=%zu", mimeType.c_str(), imgData.size());
                          // Add Image
                          tinygltf::Image gltfImg;
                          gltfImg.mimeType = mimeType;
@@ -1936,25 +1970,7 @@ json FBXPipeline::processNode(OctreeNode* node, const std::string& parentPath, i
 }
 
 std::pair<std::string, osg::BoundingBoxd> FBXPipeline::createB3DM(const std::vector<InstanceRef>& instances, const std::string& tilePath, const std::string& tileName, const SimplificationParams& simParams) {
-    // 1. Calculate RTC Offset (Center of all instances in Target Z-Up Coordinates)
-    osg::BoundingBoxd totalBox;
-    size_t validBoxes = 0;
-    for (const auto& inst : instances) {
-        if (!inst.meshInfo || !inst.meshInfo->geometry) continue;
-        const osg::BoundingBox& bbox = inst.meshInfo->geometry->getBoundingBox();
-        if (!bbox.valid()) continue;
-
-        validBoxes++;
-        const osg::Matrixd& mat = inst.meshInfo->transforms[inst.transformIndex];
-
-        // Transform the 8 corners of bbox and expand totalBox
-        for(int i=0; i<8; ++i) {
-            osg::Vec3d corner = osg::Vec3d(bbox.corner(i)) * mat;
-            totalBox.expandBy(corner);
-        }
-    }
-
-    // 2. Create GLB (TinyGLTF)
+    // 1. Create GLB (TinyGLTF)
     tinygltf::Model model;
     tinygltf::Asset asset;
     asset.version = "2.0";
@@ -1966,16 +1982,8 @@ std::pair<std::string, osg::BoundingBoxd> FBXPipeline::createB3DM(const std::vec
     osg::BoundingBoxd contentBox;
 
     TileStats tileStats;
-    osg::Vec3d rtcCenter = totalBox.valid() ? osg::Vec3d(totalBox.center()) : osg::Vec3d(0,0,0);
-    appendGeometryToModel(model, instances, settings, &batchTableJson, &batchIdCounter, simParams, &contentBox, &tileStats, tileName.c_str(), rtcCenter);
+    appendGeometryToModel(model, instances, settings, &batchTableJson, &batchIdCounter, simParams, &contentBox, &tileStats, tileName.c_str());
     LOG_I("Tile %s: nodes=%zu triangles=%zu vertices=%zu materials=%zu", tileName.c_str(), tileStats.node_count, tileStats.triangle_count, tileStats.vertex_count, tileStats.material_count);
-
-    // Shift contentBox back to World Z-up space so tileset.json gets correct bounding volume
-    if (contentBox.valid()) {
-        osg::Vec3d rtcZUp(rtcCenter.x(), -rtcCenter.z(), rtcCenter.y());
-        contentBox._min += rtcZUp;
-        contentBox._max += rtcZUp;
-    }
 
     // Populate Batch Table with node names and attributes
     std::vector<std::string> batchNames;
@@ -2054,65 +2062,101 @@ std::pair<std::string, osg::BoundingBoxd> FBXPipeline::createB3DM(const std::vec
         featureTable["BATCH_LENGTH"] = batchIdCounter;
     }
 
-    // RTC_CENTER (Z-up)
-    featureTable["RTC_CENTER"] = {
-        rtcCenter.x(),
-        -rtcCenter.z(),
-        rtcCenter.y()
-    };
-
     std::string featureTableString = featureTable.dump();
+    size_t featureTableJsonByteLength = featureTableString.size();
+    // Per 3D Tiles spec: JSON must be padded with spaces to 8-byte boundary
+    // The padding ensures the NEXT section starts at an 8-byte aligned offset
+    // Padding calculation: (8 - (current_offset + json_length) % 8) % 8
+    // where current_offset is the byte offset where JSON starts (28 for B3DM)
+    size_t featureTableStartOffset = sizeof(B3dmHeader);  // 28 bytes
+    size_t featureTablePadding = (8 - ((featureTableStartOffset + featureTableJsonByteLength) % 8)) % 8;
+    featureTableString.append(featureTablePadding, ' ');
+    featureTableJsonByteLength = featureTableString.size();  // Update to include padding
 
-    // Calculate Padding
-    // Header (28 bytes) + FeatureTableJSON (N bytes) + Padding (P bytes)
-    // Spec: "The byte length of the Feature Table JSON ... must be aligned to 8 bytes."
-    // This strictly means featureTableJSONByteLength % 8 == 0.
-
-    size_t jsonLen = featureTableString.size();
-    size_t padding = (8 - (jsonLen % 8)) % 8;
-    for(size_t i=0; i<padding; ++i) {
-        featureTableString += " ";
-    }
-
-    // Serialize Batch Table
     std::string batchTableString = "";
+    size_t batchTableJsonByteLength = 0;
+    size_t batchTablePadding = 0;
     if (!batchTableJson.empty()) {
         batchTableString = batchTableJson.dump();
-        size_t batchPadding = (8 - (batchTableString.size() % 8)) % 8;
-        for(size_t i=0; i<batchPadding; ++i) {
-            batchTableString += " ";
-        }
+        batchTableJsonByteLength = batchTableString.size();
+        // Batch Table JSON starts after Feature Table JSON
+        // Feature Table Binary length is 0, so Batch Table JSON starts at featureTableStartOffset + featureTableJsonByteLength
+        size_t batchTableStartOffset = featureTableStartOffset + featureTableJsonByteLength;
+        batchTablePadding = (8 - ((batchTableStartOffset + batchTableJsonByteLength) % 8)) % 8;
+        batchTableString.append(batchTablePadding, ' ');
+        batchTableJsonByteLength = batchTableString.size();  // Update to include padding
     }
 
-    // Now featureTableString.size() is multiple of 8.
-    // Header is 28 bytes.
-    // 28 + featureTableString.size() is 4 mod 8.
-    // So GLB starts at 4 mod 8. This is valid for GLB (4-byte alignment).
+    // Note: Per glTF 2.0 spec, GLB file does not require padding at the end
+    // The file should end immediately after the last chunk
+    // GLB chunks must be aligned to 4-byte (not 8-byte) boundaries
 
-    // Also, align GLB data size to 8 bytes (Spec recommendation for B3DM body end? No, just good practice)
-    // Actually, B3DM byteLength doesn't need to be aligned, but let's align it to 8 bytes for safety.
-    size_t glbLen = glbData.size();
-    size_t glbPadding = (8 - (glbLen % 8)) % 8;
-    for(size_t i=0; i<glbPadding; ++i) {
-        glbData += '\0';
+    // Update GLB header length
+    // GLB header: magic(4) + version(4) + length(4) = 12 bytes
+    // Per glTF 2.0 spec: length is the total length of the GLB file in bytes,
+    // including the header and all chunks
+    size_t glbTotalSize = glbData.size();
+    if (glbData.size() >= 12) {
+        uint32_t* glbLengthPtr = reinterpret_cast<uint32_t*>(&glbData[8]);
+        *glbLengthPtr = static_cast<uint32_t>(glbTotalSize);
     }
+
+    // Per 3D Tiles spec 1.0: Header is 28 bytes, no padding after header
+    // Feature Table JSON starts immediately after header at byte 28
+    // Each JSON section is padded to 8-byte boundary within its length field
+
+    // Calculate positions for alignment verification
+    // Note: featureTableJsonByteLength and batchTableJsonByteLength INCLUDE padding
+    size_t featureTableJsonStart = sizeof(B3dmHeader);  // 28 bytes
+    size_t featureTableBinaryStart = featureTableJsonStart + featureTableJsonByteLength;  // Aligned to 8 bytes
+    size_t batchTableJsonStart = featureTableBinaryStart;  // Since featureTableBinaryByteLength = 0
+    size_t batchTableBinaryStart = batchTableJsonStart + batchTableJsonByteLength;  // Aligned to 8 bytes
+    size_t glbStart = batchTableBinaryStart;  // Since batchTableBinaryByteLength = 0
+
+    // Calculate total byte length
+    // Per 3D Tiles spec 1.0: The total byte length must be aligned to 8 bytes
+    size_t totalByteLength = glbStart + glbData.size();
+    size_t filePadding = (8 - (totalByteLength % 8)) % 8;
+    totalByteLength += filePadding;
 
     // Write header
+    // Per 3D Tiles spec 1.0 and validator implementation:
+    // - JSON byte length INCLUDES padding to 8-byte boundary
+    // - Binary byte length INCLUDES padding to 8-byte boundary
+    // The validator calculates offsets by summing these lengths
     B3dmHeader header;
     header.magic = B3DM_MAGIC;
     header.version = 1;
-    header.featureTableJSONByteLength = (uint32_t)featureTableString.size();
-    header.featureTableBinaryByteLength = 0;
-    header.batchTableJSONByteLength = (uint32_t)batchTableString.size();
-    header.batchTableBinaryByteLength = 0;
-    header.byteLength = (uint32_t)(sizeof(B3dmHeader) + featureTableString.size() + batchTableString.size() + glbData.size());
+    // featureTableJsonByteLength and batchTableJsonByteLength already include padding
+    header.featureTableJSONByteLength = (uint32_t)featureTableJsonByteLength;
+    header.featureTableBinaryByteLength = 0;  // No binary data
+    header.batchTableJSONByteLength = (uint32_t)batchTableJsonByteLength;
+    header.batchTableBinaryByteLength = 0;  // No binary data
+    header.byteLength = (uint32_t)totalByteLength;
 
     outfile.write(reinterpret_cast<const char*>(&header), sizeof(B3dmHeader));
-    outfile.write(featureTableString.c_str(), featureTableString.size());
+
+    // Per 3D Tiles spec 1.0: Header is 28 bytes, Feature Table JSON starts immediately after
+    // No padding between header and Feature Table JSON
+    // Feature Table JSON must be padded to 8-byte boundary so that next section is aligned
+
+    // Write feature table JSON (padding is already included in the string)
+    outfile.write(featureTableString.c_str(), featureTableJsonByteLength);
+
+    // Write batch table JSON (padding is already included in the string)
     if (!batchTableString.empty()) {
-        outfile.write(batchTableString.c_str(), batchTableString.size());
+        outfile.write(batchTableString.c_str(), batchTableJsonByteLength);
     }
+
     outfile.write(glbData.data(), glbData.size());
+
+    // Write file padding to ensure total byte length is aligned to 8 bytes
+    // Per 3D Tiles spec: padding must be 0x00 (null bytes)
+    if (filePadding > 0) {
+        std::vector<char> paddingBytes(filePadding, '\0');
+        outfile.write(paddingBytes.data(), filePadding);
+    }
+
     outfile.close();
 
     return {filename, contentBox};
@@ -2194,30 +2238,39 @@ void FBXPipeline::writeTilesetJson(const std::string& basePath, const osg::Bound
 
     // Always add Transform to anchor local ENU coordinates to ECEF
     if (settings.longitude != 0.0 || settings.latitude != 0.0 || settings.height != 0.0) {
-        glm::dmat4 enuToEcef = GeoTransform::CalcEnuToEcefMatrix(settings.longitude, settings.latitude, settings.height);
+        glm::dmat4 enuToEcef = coords::CoordinateTransformer::CalcEnuToEcefMatrix(settings.longitude, settings.latitude, settings.height);
 
-        // Calculate center of the model (in original local coordinates)
+        // Calculate center of the model (in original local coordinates - Y-up from FBX)
         double cx = (globalBounds.xMin() + globalBounds.xMax()) * 0.5;
         double cy = (globalBounds.yMin() + globalBounds.yMax()) * 0.5;
         double cz = (globalBounds.zMin() + globalBounds.zMax()) * 0.5;
 
-        // Apply centering offset: Move model center to (0,0,0) before applying ENU->ECEF
-        // This ensures the model is placed AT the target longitude/latitude, not offset by its original coordinates.
+        // The geometry is in Z-up coordinates (x, -z, y) in B3DM.
+        // Model center in Z-up: (cx, -cz, cy)
+        //
+        // ENU_to_ECEF maps ENU origin (0,0,0) to target lon/lat/height.
+        // To place model center at target position, we need ENU origin to be at model center.
+        //
+        // In ENU coordinates (Z-up), model center is at (cx, -cz, cy).
+        // So we need to shift ENU origin by (cx, -cz, cy) in the ENU frame.
+        //
+        // This is equivalent to: transform = ENU_to_ECEF * translate(cx, -cz, cy)
+        // Which shifts the ENU origin so that model center maps to target position.
+
+        // Apply translation to ENU origin (in ENU frame, then rotated to ECEF)
         // glm is column-major
-        // NOTE: The geometry is converted from Y-Up (FBX) to Z-Up (B3DM) during writing (x, -z, y).
-        // So we must swap the center coordinates to match:
-        // Center_B3DM = (cx, -cz, cy)
-        // Offset = -Center_B3DM = (-cx, cz, -cy)
-        glm::dmat4 centerOffset(1.0);
-        centerOffset[3][0] = -cx;
-        centerOffset[3][1] = cz;
-        centerOffset[3][2] = -cy;
+        // Translation in ENU frame: (cx, -cz, cy)
+        // After ENU_to_ECEF rotation, this becomes a translation in ECEF
+        double tx = cx;
+        double ty = -cz;  // Z-up: y is north, FBX z becomes -y in Z-up
+        double tz = cy;   // FBX y becomes z in Z-up
 
-        // Combine: Final = ENU_to_ECEF * CenterOffset
-        // Vertex_Final = ENU_to_ECEF * (Vertex_Local - Center)
-        enuToEcef = enuToEcef * centerOffset;
+        // Add translation to the transform (ENU_to_ECEF * translation)
+        enuToEcef[3][0] += tx * enuToEcef[0][0] + ty * enuToEcef[1][0] + tz * enuToEcef[2][0];
+        enuToEcef[3][1] += tx * enuToEcef[0][1] + ty * enuToEcef[1][1] + tz * enuToEcef[2][1];
+        enuToEcef[3][2] += tx * enuToEcef[0][2] + ty * enuToEcef[1][2] + tz * enuToEcef[2][2];
 
-        LOG_I("Applied centering offset: (%.2f, %.2f, %.2f) to move model center to origin.", cx, cy, cz);
+        LOG_I("Model center Y-up: (%.2f, %.2f, %.2f), Z-up: (%.2f, %.2f, %.2f)", cx, cy, cz, tx, ty, tz);
 
         const double* m = (const double*)&enuToEcef;
         tileset["root"]["transform"] = {
